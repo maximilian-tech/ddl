@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 import functools
 import os
+
+import mpi4py.MPI
 import torch
 from torch.utils.data import TensorDataset
 
@@ -18,6 +20,7 @@ from mpi4py import MPI
 from mpi4py.util import dtlib
 import math
 import time
+
 
 # ToDo: Check what happens if epochs < workers , etc ...
 
@@ -73,7 +76,7 @@ def with_logging(func: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def for_all_methods(
-    decorator: Callable[..., Any], exclude: str | list[str, ...] | None = None
+        decorator: Callable[..., Any], exclude: str | list[str, ...] | None = None
 ):
     if exclude is None:
         exclude = []
@@ -95,7 +98,10 @@ class ProducerFunctionSkeleton:
         self.rank_global = None
 
     def on_init(self, *args, **kwargs):
-        self.rank_global = kwargs["rank_global"]
+        try:
+            self.rank_global = kwargs["rank_global"]
+        except KeyError:
+            self.rank_global = MPI.COMM_WORLD.Get_rank()
 
     def post_init(self, *args, **kwargs):
         self.my_ary = kwargs["my_ary"]
@@ -135,11 +141,13 @@ class MPI_Env:
 def init_mpi_error_handling(comm_global, n_instances):
     rank_global = comm_global.Get_rank()
     size_global = comm_global.Get_size()
+
     if size_global < 2:
         if rank_global == 0:
-            logging.error("At least 2 MPI processes are required.")
-        comm_global.Barrier()
-        comm_global.Abort(2)
+            logging.warning(f"Using only a single rank!")
+    #         logging.error("At least 2 MPI processes are required.")
+    #     comm_global.Barrier()
+    #     comm_global.Abort(2)
 
     print(f"{rank_global=} {size_global=} {n_instances=}")
 
@@ -151,6 +159,13 @@ def init_mpi_error_handling(comm_global, n_instances):
 
         comm_global.Barrier()
         comm_global.Abort(1)
+
+
+class DoesNotMatchError(Exception):
+    def __init(self, value, message):
+        self.value = value
+        self.message = message
+        super().__init__(message)
 
 
 def init_mpi(n_instances: int = 1) -> MPI_Env:
@@ -170,20 +185,26 @@ def init_mpi(n_instances: int = 1) -> MPI_Env:
     logging.info("Creating sub communicator")
     logging.debug(f"{rank_global=} {size_global=} {n_instances=} {color_per_gpu=}")
     comm_per_gpu = comm_global.Split(color=color_per_gpu, key=rank_global)
-    comm_per_gpu.Set_name(f"comm_per_gpu{color_per_gpu}")
+    comm_per_gpu.Set_name(f"comm_per_gpu_{color_per_gpu}")
 
     rank_per_gpu = comm_per_gpu.Get_rank()
     size_per_gpu = comm_per_gpu.Get_size()
 
+    logging.debug(f"{rank_global}: {rank_per_gpu=} {size_per_gpu=}")
+
     # create Shared Memory (SHM) Communicators
     comm_per_gpu_shm = comm_per_gpu.Split_type(
-        split_type=MPI.WIN_FLAVOR_SHARED, key=rank_per_gpu, info=MPI.INFO_NULL
+       split_type=MPI.WIN_FLAVOR_SHARED, key=rank_per_gpu, info=MPI.INFO_NULL
+       # split_type=MPI.WIN_FLAVOR_SHARED, key=rank_per_gpu, info=MPI.INFO_NULL
     )
-    comm_per_gpu_shm.Set_name(f"comm_per_gpu_shm{color_per_gpu}")
+    comm_per_gpu_shm.Set_name(f"comm_per_gpu_shm_{color_per_gpu}")
     rank_per_gpu_shm = comm_per_gpu_shm.Get_rank()
     size_per_gpu_shm = comm_per_gpu_shm.Get_size()
-    assert size_per_gpu_shm == size_per_gpu
 
+    logging.debug(f"{rank_global}: {rank_per_gpu_shm=} {size_per_gpu_shm=}")
+    if size_per_gpu_shm != size_per_gpu:
+        raise DoesNotMatchError((size_per_gpu_shm, size_per_gpu),
+                                f"{size_per_gpu_shm=} != {size_per_gpu=}")
     # this communicator connects the n-th datapushers to each other
     # n_instances      = 3
     # rank             = 0 1 2 3 4 5 6 7 8 9 10 11
@@ -270,9 +291,9 @@ class Connection:
 
     @with_logging
     def send_metadata(
-        self,
-        metadata: MetaData_Producer_To_Consumer | MetaData_Consumer_To_Producer,
-        called_from: str,
+            self,
+            metadata: MetaData_Producer_To_Consumer | MetaData_Consumer_To_Producer,
+            called_from: str,
     ) -> None:
         if called_from == "consumer":
             for t in range(1, self.comm_per_gpu_shm.Get_size()):
@@ -283,11 +304,11 @@ class Connection:
             raise ValueError(f"{called_from=} is not valid")
 
     def recv_metadata(
-        self, called_from
+            self, called_from
     ) -> (
-        MetaData_Producer_To_Consumer
-        | MetaData_Consumer_To_Producer
-        | list[MetaData_Producer_To_Consumer | MetaData_Consumer_To_Producer]
+            MetaData_Producer_To_Consumer
+            | MetaData_Consumer_To_Producer
+            | list[MetaData_Producer_To_Consumer | MetaData_Consumer_To_Producer]
     ):
         if called_from == "producer":
             data = self.comm_per_gpu_shm.recv(source=0, tag=0)
@@ -301,7 +322,7 @@ class Connection:
         return data
 
     def init_windows(
-        self, shapes: tuple[int, ...] | list[tuple[int, ...], ...]
+            self, shapes: tuple[int, ...] | list[tuple[int, ...], ...]
     ) -> list[ArrayLike]:
         # ToDo: Support only tensors of PyTorch and
         #       a) use pinned memory
@@ -413,11 +434,11 @@ class GlobalShuffler:
     """
 
     def __init__(
-        self,
-        my_ary: ArrayLike,
-        num_exchange: int,
-        comm_nth_pusher: MPI.Intracomm,
-        comm_global: MPI.Intracomm = None,
+            self,
+            my_ary: ArrayLike,
+            num_exchange: int,
+            comm_nth_pusher: MPI.Intracomm,
+            comm_global: MPI.Intracomm = None,
     ):
         self.my_ary = my_ary
         self.num_exchange = num_exchange
@@ -484,11 +505,11 @@ class GlobalShuffler:
 
 class GlobalShuffler_SendRecvReplace(GlobalShuffler):
     def __init__(
-        self,
-        my_ary: ArrayLike,
-        num_exchange: int,
-        comm_nth_pusher: MPI.Intracomm,
-        comm_global: MPI.Intracomm = None,
+            self,
+            my_ary: ArrayLike,
+            num_exchange: int,
+            comm_nth_pusher: MPI.Intracomm,
+            comm_global: MPI.Intracomm = None,
     ):
         super().__init__(my_ary, num_exchange, comm_nth_pusher, comm_global)
 
@@ -503,7 +524,7 @@ class GlobalShuffler_SendRecvReplace(GlobalShuffler):
             recvtag=50,
         )
         self.comm_nth_pusher.Sendrecv_replace(
-            self.my_ary[self.num_exchange // 2 : self.num_exchange],
+            self.my_ary[self.num_exchange // 2: self.num_exchange],
             dest=recv_from,
             sendtag=51,
             source=send_to,
@@ -640,15 +661,15 @@ class DistributedDataloaderABC(ABC):
 @for_all_methods(with_logging, exclude="__getitem__")
 class DistributedDataLoader(DistributedDataloaderABC):
     def __init__(
-        self,
-        producer_function: ProducerFunctionSkeleton,
-        batch_size: int,
-        connection: Connection,
-        n_epochs: int,
-        fraction_exchange: float,
-        exchange_method: str,
-        instance_idx: int,
-        n_instances: int,
+            self,
+            producer_function: ProducerFunctionSkeleton,
+            batch_size: int,
+            connection: Connection,
+            n_epochs: int,
+            fraction_exchange: float,
+            exchange_method: str,
+            instance_idx: int,
+            n_instances: int,
     ):
         self.epoch = 0
         self.batch = 0
@@ -658,58 +679,61 @@ class DistributedDataLoader(DistributedDataloaderABC):
         self.batch_size = batch_size
         self.connection = connection
 
-        # Send Metadata to the data producer
-        # ToDo: define what metadata is needed
-        self.metadata_to_producer = MetaData_Consumer_To_Producer(
-            producer_function=producer_function,
-            global_shuffle_fraction_exchange=fraction_exchange,
-            global_shuffle_exchange_method=exchange_method,
-            batch_size=batch_size,
-        )
-        self.connection.send_metadata(self.metadata_to_producer, "consumer")
+        if mpi4py.MPI.COMM_WORLD.Get_size() > 1:
 
-        # Receive Metadata from the data producer
-        self.metadata_from_producer: list[
-            MetaData_Producer_To_Consumer
-        ] = self.connection.recv_metadata("consumer")
+            # Send Metadata to the data producer
+            # ToDo: define what metadata is needed
+            self.metadata_to_producer = MetaData_Consumer_To_Producer(
+                producer_function=producer_function,
+                global_shuffle_fraction_exchange=fraction_exchange,
+                global_shuffle_exchange_method=exchange_method,
+                batch_size=batch_size,
+            )
+            self.connection.send_metadata(self.metadata_to_producer, "consumer")
 
-        # ToDo:
-        # 1. It depends on the "mode" is the batches per window are accumulated or not!
-        # Do not mix up the two types of parallelism!!!!!
-        self.splits: list[tuple[int]] = [x.splits for x in self.metadata_from_producer]
-        self.batches_per_window: list[int] = [
-            x.batches_per_window for x in self.metadata_from_producer
-        ]
+            # Receive Metadata from the data producer
+            self.metadata_from_producer: list[
+                MetaData_Producer_To_Consumer
+            ] = self.connection.recv_metadata("consumer")
 
-        mode = ["split_along_epoch", "do_not_split_along_epoch"]
-        self.mode = mode[1]  # Only Mode 1 is logically correct
-        if self.mode == "do_not_split_along_epoch":
-            self._len = self.batches_per_window[
-                0
-            ]  # Total number of batches in an epoch
-        elif self.mode == "split_along_epoch":
-            self._len: int = sum(
-                self.batches_per_window
-            )  # Total number of batches in an epoch
-        else:
-            raise ValueError(f"Unknown mode {mode}")
+            # ToDo:
+            # 1. It depends on the "mode" is the batches per window are accumulated or not!
+            # Do not mix up the two types of parallelism!!!!!
+            self.splits: list[tuple[int]] = [x.splits for x in self.metadata_from_producer]
+            self.batches_per_window: list[int] = [
+                x.batches_per_window for x in self.metadata_from_producer
+            ]
 
-        assert self._len > 0
-        shape: list[tuple[int, ...]] = [x.shape for x in self.metadata_from_producer]
+            mode = ["split_along_epoch", "do_not_split_along_epoch"]
+            self.mode = mode[1]  # Only Mode 1 is logically correct
+            if self.mode == "do_not_split_along_epoch":
+                self._len = self.batches_per_window[
+                    0
+                ]  # Total number of batches in an epoch
+            elif self.mode == "split_along_epoch":
+                self._len: int = sum(
+                    self.batches_per_window
+                )  # Total number of batches in an epoch
+            else:
+                raise ValueError(f"Unknown mode {mode}")
 
-        self.arys: list[ArrayLike] = self.connection.init_windows(shape)
+            assert self._len > 0
+            shape: list[tuple[int, ...]] = [x.shape for x in self.metadata_from_producer]
 
-        self.connection.lock_windows()
-        # Data producer will start producing data
+            self.arys: list[ArrayLike] = self.connection.init_windows(shape)
 
-        # Sync with Producers
-        self.connection.Barrier()
+            self.connection.lock_windows()
+            # Data producer will start producing data
 
-        logging.debug(
-            f"[{MPI.COMM_WORLD.Get_rank():03d}]: *** Barrier {self._len=} ***"
-        )
+            # Sync with Producers
+            self.connection.Barrier()
 
-        self._start_access_epoch()
+            logging.debug(
+                f"[{MPI.COMM_WORLD.Get_rank():03d}]: *** Barrier {self._len=} ***"
+            )
+
+            self._start_access_epoch()
+
 
     def __len__(self) -> int:
         return self._len
@@ -725,7 +749,7 @@ class DistributedDataLoader(DistributedDataloaderABC):
         )
         # ToDo: What to do with the ugly 'self.target-1'?
         start: int = self.batch_size * (
-            idx % self.batches_per_window[self.target_rank - 1]
+                idx % self.batches_per_window[self.target_rank - 1]
         )
         end: int = start + self.batch_size
 
@@ -821,11 +845,11 @@ class DataProducerOnInitReturn:
 @for_all_methods(with_logging)
 class DataPusher(DataPusherABC):
     def __init__(
-        self,
-        connection: Connection,
-        comm_per_gpu_shm: MPI.Intracomm,
-        comm_nth_pusher: MPI.Intracomm,
-        comm_global: MPI.Intracomm,
+            self,
+            connection: Connection,
+            comm_per_gpu_shm: MPI.Intracomm,
+            comm_nth_pusher: MPI.Intracomm,
+            comm_global: MPI.Intracomm,
     ) -> None:
         self.callbacks = []
 
@@ -847,7 +871,7 @@ class DataPusher(DataPusherABC):
         )
         # Todo: how does this behave if different for different producer?
         batches_per_window: int = (
-            on_init_return.nData // self.metadata_from_consumer.batch_size
+                on_init_return.nData // self.metadata_from_consumer.batch_size
         )
         assert batches_per_window > 0
 
@@ -866,7 +890,7 @@ class DataPusher(DataPusherABC):
         )
         self.my_ary = self.arys[
             self.rank_per_gpu_shm - 1
-        ]  # rank -1 because rank 0 is the master and has no ary
+            ]  # rank -1 because rank 0 is the master and has no ary
         self.connection.lock_windows()
 
         num_exchange = int(
@@ -880,8 +904,8 @@ class DataPusher(DataPusherABC):
         # ToDo: Probably pass GlobalShuffeler object via the DistributedDataloader to here
         if (self.n_instance > 1) and (num_exchange > 0):
             if (
-                self.metadata_from_consumer.global_shuffle_exchange_method
-                == "sendrecv_replace"
+                    self.metadata_from_consumer.global_shuffle_exchange_method
+                    == "sendrecv_replace"
             ):
                 global_shuffler = GlobalShuffler_SendRecvReplace(
                     self.my_ary,
@@ -966,7 +990,11 @@ def distributed_dataloader(func):
             n_instances = 1  # default for local testing
 
         mpi_env: MPI_Env = init_mpi(n_instances=n_instances)
-        conn = Connection(mpi_env.comm_per_gpu_shm)
+        if mpi4py.MPI.COMM_WORLD.Get_size() > 1:
+            conn = Connection(mpi_env.comm_per_gpu_shm)
+        else:
+            conn = None
+
         if mpi_env.comm_per_gpu_shm.Get_rank() == 0:
             func(*args, mpi_env, conn)
         else:
