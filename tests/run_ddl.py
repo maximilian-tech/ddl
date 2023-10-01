@@ -1,6 +1,6 @@
 import mpi4py.MPI
 import pytest
-
+import sys
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ import os
 from socket import gethostname
 
 from dataclasses import dataclass, asdict
-from ddl.mpi_dataloader import *
+import ddl
 
 import numpy as np
 
@@ -112,7 +112,7 @@ class DummyDataset(PointWiseData):
         print("Done with init")
 
 
-class Data_Producer(ProducerFunctionSkeleton):
+class Data_Producer(ddl.ProducerFunctionSkeleton):
     def __init__(self, cfg, data, idx: int, n_instances: int):
         super().__init__()
         self.rng = None
@@ -157,7 +157,7 @@ class Data_Producer(ProducerFunctionSkeleton):
         assert nData > 0
         assert nValues > 0
 
-        return DataProducerOnInitReturn(nData, nValues, shape, splits)
+        return ddl.DataProducerOnInitReturn(nData, nValues, shape, splits)
 
     def post_init(self, *args, **kwargs):
         # fill the array
@@ -182,7 +182,7 @@ class Data_Producer(ProducerFunctionSkeleton):
         self.rng.shuffle(self.my_ary)
 
 
-@distributed_dataloader
+@ddl.distributed_dataloader
 def main(cfg, mpi_env, conn):
     device, backend = (
         ("cpu", "gloo") if not torch.cuda.is_available() else ("cuda", "nccl")
@@ -238,7 +238,7 @@ def main(cfg, mpi_env, conn):
         n_instances=world_size
     )
 
-    train_dataloader = DistributedDataLoader(
+    train_dataloader = ddl.DistributedDataLoader(
         producer_function=producer_function,
         batch_size=cfg.params.batch_size,
         connection=conn,
@@ -260,8 +260,8 @@ def main(cfg, mpi_env, conn):
             # target = target.to(device)
             # sample_weight = sample_weight.to(device)
 
-            train_dataloader.mark(Marker.END_OF_BATCH)
-        train_dataloader.mark(Marker.END_OF_EPOCH)
+            train_dataloader.mark(ddl.Marker.END_OF_BATCH)
+        train_dataloader.mark(ddl.Marker.END_OF_EPOCH)
 
     print("Training finished")
 
