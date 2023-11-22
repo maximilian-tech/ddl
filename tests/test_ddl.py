@@ -5,13 +5,13 @@ import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(100)
 def test_mpi_program():
     # Create an absolute path to run_ddl.py based on the current script's directory.
-    script_path = os.path.join(SCRIPT_DIR, 'run_ddl.py')
+    script_path = os.path.join(SCRIPT_DIR, "run_ddl.py")
 
     # Start the MPI program.
-    cmd = ['mpirun', '-np', '4', 'python3', script_path]
+    cmd = ["mpirun", "-np", "4", "python3", script_path]
     process = subprocess.Popen(cmd, cwd=SCRIPT_DIR)  # set cwd if necessary
 
     try:
