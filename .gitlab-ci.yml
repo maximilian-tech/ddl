@@ -1,6 +1,7 @@
 image: python:3.10
 
 stages:
+  - build
   - lint
   - test
 
@@ -10,109 +11,85 @@ variables:
   POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.poetry/cache"
   POETRY_VIRTUALENVS_IN_PROJECT: 'true'
   POETRY_VIRTUALENVS_OPTIONS_ALWAYS_COPY: 'true'
-  CACHE_COMPRESSION_LEVEL: 'fast'
+  CACHE_COMPRESSION_LEVEL: 'fastest'
   FF_USE_FASTZIP: 'true'
+  OMPI_ALLOW_RUN_AS_ROOT: '1'
+  OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
 
-cache:
-  key: python-$CI_COMMIT_REF_SLUG
-  paths:
-    - ".cache/"
-    - ".poetry/"
-    - ".venv/"
-
-
-before_script:
-  - echo "Installing Poetry..."
-  - echo 'export PATH="$PATH:/root/.local/bin"' >> ~/.bashrc && source ~/.bashrc
-  - echo  "CI_BUILDS_DIR:" "$CI_BUILDS_DIR"
-  - echo  "CI_PROJECT_DIR:" "$CI_PROJECT_DIR"
-  - pwd
-  - pip install --user --upgrade pipx
-  - pipx ensurepath
-  - pipx install poetry
-#  - poetry install -vvv --with dev --no-root
-  - poetry install -vvv --with dev
-  - pip --version
-  - source $(poetry env info --path)/bin/activate
-  - python --version; echo "pipx $(pipx --version)"; poetry --version
-  - echo "CI_COMMIT_REF_SLUG:" "$CI_COMMIT_REF_SLUG"
-  - echo "CI_COMMIT_BRANCH:" "$CI_COMMIT_BRANCH"
-
-pytest:
-  stage: test
-  script:
-    - apt-get update && apt-get install -y libgraphviz-dev && apt-get clean
-    - pytest --cov --cov-report term --cov-report xml:coverage.xml tests/
-  allow_failure: false
-  coverage: "/(?i)total.*? (100(?:\\.0+)?\\%|[1-9]?\\d(?:\\.\\d+)?\\%)$/"
-  cache:
-    key: python-$CI_COMMIT_REF_SLUG
+default:
+  cache: &global_cache
+    key:
+      files:
+        - poetry.lock
+      prefix: "$CI_COMMIT_REF_SLUG"
     paths:
       - ".cache/"
       - ".poetry/"
       - ".venv/"
-      - ".pytest_cache/"
+      - ".apt/"
+    untracked: true
+    when: 'always'
+    policy: pull
+  before_script:
+    - echo "Installing Dependencies..."
+    - echo 'export PATH="$PATH:/root/.local/bin"' >> ~/.bashrc && source ~/.bashrc
+    - echo  "CI_BUILDS_DIR:" "$CI_BUILDS_DIR"
+    - echo  "CI_PROJECT_DIR:" "$CI_PROJECT_DIR"
+    - pwd
+    - rm -f /etc/apt/apt.conf.d/docker-clean
+    - mkdir .apt && mkdir /var/cache/apt/archives && mount --bind .apt /var/cache/apt/archives/
+    - apt-get update && apt-get install -y openmpi-bin libopenmpi-dev libgraphviz-dev
+    - pip install --user --upgrade pipx
+    - pipx ensurepath
+    - pipx install poetry
+    #  - poetry install -vvv --with dev --no-root
+    - poetry install -vvv --with dev
+    - pip --version
+    - source $(poetry env info --path)/bin/activate
+    - python --version; echo "pipx $(pipx --version)"; poetry --version
+    - echo "CI_COMMIT_REF_SLUG:" "$CI_COMMIT_REF_SLUG"
+    - echo "CI_COMMIT_BRANCH:" "$CI_COMMIT_BRANCH"
+  interruptible: true
+
+build_cache:
+  stage: build
+  script:
+    - echo "Building cache..."
+  allow_failure: false
+  cache:
+    <<: *global_cache
+    policy: pull-push
+  tags:
+    - docker
+  interruptible: false
+
+pytest:
+  stage: test
+  script:
+    - pytest --cov --cov-report term --cov-report xml:coverage.xml tests/
+  allow_failure: false
+  coverage: "/(?i)total.*? (100(?:\\.0+)?\\%|[1-9]?\\d(?:\\.\\d+)?\\%)$/"
   artifacts:
     reports:
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
   tags:
-    - dissertation_runner
-  interruptible: true
+    - docker
 
 mypy:
   stage: test
   script:
     - mypy .
   allow_failure: false
-  cache:
-    key: python-$CI_COMMIT_REF_SLUG
-    paths:
-      - ".cache/"
-      - ".poetry/"
-      - ".venv/"
-      - ".mypy_cache/"
   tags:
-    - dissertation_runner
-  interruptible: true
+    - docker
 
 ruff:
   stage: lint
   script:
     - ruff check .
-  allow_failure: false
-  cache:
-    key: python-$CI_COMMIT_REF_SLUG
-    paths:
-      - ".cache/"
-      - ".poetry/"
-      - ".venv/"
+    - ruff format --check .
+  allow_failure: true
   tags:
-    - dissertation_runner
-  interruptible: true
-
-black:
-  stage: lint
-  script:
-    - black --check --diff .
-    - |
-      (black --check . 2>&1) > black_check_output.txt
-      echo 'Metrics:'
-      unchanged_files=$(grep -oE '[0-9]+ file[s]? would be left unchanged.' < black_check_output.txt | grep -oE '[0-9]+' || echo "0")
-      echo "Black_Unchanged_Files $unchanged_files" > metrics.txt
-      echo "Black_Unchanged_Files $unchanged_files"
-      reformatted_files=$(grep -oE '[0-9]+ file[s]? would be reformatted.' < black_check_output.txt | grep -oE '[0-9]+' || echo "0")
-      echo "Black_Reformatted_Files $reformatted_files" >> metrics.txt
-      echo "Black_Reformatted_Files $reformatted_files"
-
-  allow_failure: false
-  tags:
-    - dissertation_runner
-  cache:
-    key: python-$CI_COMMIT_REF_SLUG
-    paths:
-      - ".cache/"
-      - ".poetry/"
-      - ".venv/"
-  interruptible: true
+    - docker

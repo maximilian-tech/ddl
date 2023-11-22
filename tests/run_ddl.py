@@ -1,17 +1,17 @@
 import mpi4py.MPI
-import pytest
+
 import sys
 
 import torch
-import torch.nn as nn
+
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
+
 from torch.utils.data import TensorDataset
 
 import os
 from socket import gethostname
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import ddl
 
 import numpy as np
@@ -35,11 +35,11 @@ class PointWiseData(object):
 
     @property
     def x(self):
-        return self.data[:, self.n_p: self.n_p + self.n_x]
+        return self.data[:, self.n_p : self.n_p + self.n_x]
 
     @property
     def u(self):
-        return self.data[:, self.n_p + self.n_x: self.n_p + self.n_x + self.n_o]
+        return self.data[:, self.n_p + self.n_x : self.n_p + self.n_x + self.n_o]
 
     @staticmethod
     def standard_normalize(raw_data, area_weighted=False):
@@ -78,29 +78,21 @@ class PointWiseData(object):
 
 
 class DummyDataset(PointWiseData):
-    def __init__(
-            self, path: str, file: str, nTimesteps: int, idx: int, n_instances: int
-    ):
+    def __init__(self, path: str, file: str, nTimesteps: int, idx: int, n_instances: int):
         nData = nTimesteps * 10052
 
-        start = (
-                -(idx + 1) * nData // n_instances - 1
-        )  # this cannot be 0, but has to be -1 because of inverted slicing
+        start = -(idx + 1) * nData // n_instances - 1  # this cannot be 0, but has to be -1 because of inverted slicing
         end = -idx * nData // n_instances - 1
         # print(f"CombusterTurbineInterface {start=}, {end=}")
         data = np.random.rand(end - start, 10).astype("float32")
 
-        print(
-            f"[{mpi4py.MPI.COMM_WORLD.Get_rank():03d}]: {data.shape=} {start=}, {end=}"
-        )
+        print(f"[{mpi4py.MPI.COMM_WORLD.Get_rank():03d}]: {data.shape=} {start=}, {end=}")
 
         #        print(f'{data.shape=}') # [10052*1000,10]
         parameter_data = data[:, [0]]
         x_data = data[:, [2, 3]]
         u_data = data[:, [4, 5, 6, 7, 8]]
-        _sample_weight = (
-            data[:, [-1]]
-        )  # increase due to fp32 floatingpoint accuracy
+        _sample_weight = data[:, [-1]]  # increase due to fp32 floatingpoint accuracy
         super().__init__(parameter_data, x_data, u_data, _sample_weight)
         self.data, self.mean, self.std, self.sample_weight = self.minmax_normalize(
             self.data_raw,
@@ -147,9 +139,7 @@ class Data_Producer(ddl.ProducerFunctionSkeleton):
         )
 
         nData = self.training_data.tensors[0].shape[0]
-        splits: tuple[int, ...] = tuple(
-            [x.shape[1] for x in self.training_data.tensors]
-        )
+        splits: tuple[int, ...] = tuple([x.shape[1] for x in self.training_data.tensors])
         nValues = sum(splits)
         shape: tuple[int, ...] = (nData, nValues)
 
@@ -164,12 +154,7 @@ class Data_Producer(ddl.ProducerFunctionSkeleton):
         assert self.nData is not None
         self.my_ary = kwargs["my_ary"]
         self.my_ary[...] = np.concatenate(
-            (
-                [
-                    x.numpy().copy().reshape(self.nData, -1)
-                    for x in self.training_data.tensors
-                ]
-            ),
+            ([x.numpy().copy().reshape(self.nData, -1) for x in self.training_data.tensors]),
             axis=-1,
         )
 
@@ -184,21 +169,17 @@ class Data_Producer(ddl.ProducerFunctionSkeleton):
 
 @ddl.distributed_dataloader
 def main(cfg, mpi_env, conn):
-    device, backend = (
-        ("cpu", "gloo") if not torch.cuda.is_available() else ("cuda", "nccl")
-    )
+    device, backend = ("cpu", "gloo") if not torch.cuda.is_available() else ("cuda", "nccl")
 
     try:
         gpus_per_node = int(os.environ["SLURM_GPUS_PER_NODE"])
     except KeyError:
-        gpus_per_node = (
-            mpi_env.n_instances
-        )  # ToDo: not clean, only works for 1 node (e.g. local testing)
+        gpus_per_node = mpi_env.n_instances  # ToDo: not clean, only works for 1 node (e.g. local testing)
         # raise ValueError("SLURM_GPUS_PER_NODE not set (should be same as n_instances")
 
     if device == "cuda":
         pass
-        #assert gpus_per_node == torch.cuda.device_count()
+        # assert gpus_per_node == torch.cuda.device_count()
 
     try:
         _ = os.environ["MASTER_ADDR"]
@@ -229,14 +210,9 @@ def main(cfg, mpi_env, conn):
     if device == "cuda":
         torch.device(f"{device}:{local_rank}")
         device = f"{device}:{local_rank}"
-        print(f"USING GPU!", flush=True)
+        print("USING GPU!", flush=True)
 
-    producer_function = Data_Producer(
-        cfg=cfg,
-        data=DummyDataset,
-        idx=rank,
-        n_instances=world_size
-    )
+    producer_function = Data_Producer(cfg=cfg, data=DummyDataset, idx=rank, n_instances=world_size)
 
     train_dataloader = ddl.DistributedDataLoader(
         producer_function=producer_function,
@@ -252,9 +228,7 @@ def main(cfg, mpi_env, conn):
     for epoch in range(cfg.params.nepoch):
         print(f"Epoch {epoch + 1} of {cfg.params.nepoch}")
 
-        logging.debug(
-            f"[{mpi_env.comm_global.Get_rank():03d}]: {len(train_dataloader)=}"
-        )
+        logging.debug(f"[{mpi_env.comm_global.Get_rank():03d}]: {len(train_dataloader)=}")
         for i, (pos, target, sample_weight) in enumerate(train_dataloader):
             # pos = pos.to(device)
             # target = target.to(device)
@@ -325,17 +299,16 @@ class Config:
 
 
 def main_proxy():
-    home = os.path.expanduser("~")
+    # home = os.path.expanduser("~")
     cfg = Config(
-        paths=Paths(
-            data='unused-dummy', log="./runs", save_dir="../../saved_models/"
-        ),
+        paths=Paths(data="unused-dummy", log="./runs", save_dir="../../saved_models/"),
         files=Files(dataset="unused-dummy"),
         params=Params(
             nepoch=3,  # increase for more 'outer' iterations, increases total work
             lr=7e-4,
             batch_size=64 * 64,
-            # Increase for larger batch size (needs more memory, longer kernels), decreases 'inner' iterations, does not change total work
+            # Increase for larger batch size (needs more memory, longer kernels),
+            #   decreases 'inner' iterations, does not change total work
             checkpt_epoch=2,
             display_epoch=100,
             print_figure_epoch=1,
@@ -373,4 +346,3 @@ if __name__ == "__main__":
 
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     main_proxy()
-
