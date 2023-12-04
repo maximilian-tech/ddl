@@ -14,8 +14,8 @@ __all__ = [
 
 from .mpi_dataloader import (
     ProducerFunctionSkeleton,
-    DataProducerOnInitReturn,
-    distributed_dataloader,
     DistributedDataLoader,
     Marker,
 )
+from .ddl_env import distributed_dataloader
+from .datapusher import DataProducerOnInitReturn
