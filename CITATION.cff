@@ -1,0 +1,15 @@
+# What is a CITATION.cff file?
+# See https://citation-file-format.github.io/
+
+cff-version: 1.2.0
+title: Distributed Dataloader for PyTorch
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Maximilian
+    family-names: Sander
+    email: maximilian.sander1@tu-dresden.de
+    affiliation: TUD Dresden University of Technology
+license: LGPL-2.1-only
